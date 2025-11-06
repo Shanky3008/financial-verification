@@ -337,8 +337,8 @@ class ReportGenerator:
         # Headers
         headers = [
             "Line Item Description",
-            "Current Year Comparative (FY 2024)",
-            "Previous Year Actual (FY 2024)",
+            "Current Year Comparative",
+            "Previous Year Actual",
             "Difference",
             "Status",
             "Similarity Score"

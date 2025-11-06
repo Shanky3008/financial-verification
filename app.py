@@ -89,7 +89,9 @@ with tab1:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📅 Current Year (FY 2025)")
+        st.subheader("📅 Current Year")
+        st.caption("Financial statements with previous year comparatives")
+        st.markdown("_Example: FY 2025 statements showing FY 2024 comparatives_")
         current_year_file = st.file_uploader(
             "Upload current year financial statements",
             type=['pdf', 'xlsx', 'xls'],
@@ -97,9 +99,11 @@ with tab1:
         )
         if current_year_file:
             st.success(f"✅ {current_year_file.name}")
-    
+
     with col2:
-        st.subheader("📅 Previous Year (FY 2024)")
+        st.subheader("📅 Previous Year")
+        st.caption("Actual financial statements to verify against")
+        st.markdown("_Example: FY 2024 actual statements_")
         previous_year_file = st.file_uploader(
             "Upload previous year financial statements",
             type=['pdf', 'xlsx', 'xls'],
