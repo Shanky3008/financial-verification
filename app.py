@@ -569,6 +569,18 @@ with tab2:
     with st.sidebar:
         st.header("🔑 API Configuration")
 
+        # Check for pre-configured team API keys in Streamlit secrets
+        team_openai_key = None
+        team_anthropic_key = None
+
+        try:
+            if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+                team_openai_key = st.secrets["openai"]["api_key"]
+            if "anthropic" in st.secrets and "api_key" in st.secrets["anthropic"]:
+                team_anthropic_key = st.secrets["anthropic"]["api_key"]
+        except:
+            pass  # Secrets not configured, will use manual entry
+
         api_provider = st.radio(
             "Choose API Provider",
             ["OpenAI (GPT-4o-mini)", "Anthropic (Claude Haiku)"],
@@ -581,18 +593,50 @@ with tab2:
                 st.error("OpenAI not installed. Run: pip install openai")
                 api_key_llm = None
             else:
-                api_key_llm = st.text_input("OpenAI API Key", type="password", key="openai_key")
-                if api_key_llm:
-                    st.success("✅ OpenAI configured")
+                # Check if team key is available
+                if team_openai_key:
+                    api_key_llm = team_openai_key
+                    st.success("✅ Using team OpenAI key (pre-configured)")
+
+                    # Allow override with custom key
+                    with st.expander("🔧 Use different API key"):
+                        custom_key = st.text_input("Custom OpenAI API Key", type="password", key="openai_custom")
+                        if custom_key:
+                            api_key_llm = custom_key
+                            st.info("Using your custom key instead")
+                else:
+                    # No team key, require manual entry
+                    api_key_llm = st.text_input("OpenAI API Key", type="password", key="openai_key",
+                                               help="Enter your OpenAI API key")
+                    if api_key_llm:
+                        st.success("✅ OpenAI configured")
+                    else:
+                        st.warning("⚠️ No team API key configured. Please enter your key above.")
         else:
             use_claude = True
             if not HAS_ANTHROPIC:
                 st.error("Anthropic not installed. Run: pip install anthropic")
                 api_key_llm = None
             else:
-                api_key_llm = st.text_input("Anthropic API Key", type="password", key="claude_key")
-                if api_key_llm:
-                    st.success("✅ Claude configured")
+                # Check if team key is available
+                if team_anthropic_key:
+                    api_key_llm = team_anthropic_key
+                    st.success("✅ Using team Anthropic key (pre-configured)")
+
+                    # Allow override with custom key
+                    with st.expander("🔧 Use different API key"):
+                        custom_key = st.text_input("Custom Anthropic API Key", type="password", key="claude_custom")
+                        if custom_key:
+                            api_key_llm = custom_key
+                            st.info("Using your custom key instead")
+                else:
+                    # No team key, require manual entry
+                    api_key_llm = st.text_input("Anthropic API Key", type="password", key="claude_key",
+                                               help="Enter your Anthropic API key")
+                    if api_key_llm:
+                        st.success("✅ Claude configured")
+                    else:
+                        st.warning("⚠️ No team API key configured. Please enter your key above.")
 
         st.markdown("---")
         st.info("💡 Cost: ~$3-5 per comparison")
