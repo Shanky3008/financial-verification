@@ -61,14 +61,10 @@ with st.sidebar:
         help="How closely text descriptions must match (0.5 = lenient, 1.0 = exact)"
     )
     
-    amount_tolerance = st.slider(
-        "Amount Tolerance (%)",
-        min_value=0.0,
-        max_value=10.0,
-        value=1.0,
-        step=0.1,
-        help="Acceptable variance in amounts as percentage"
-    ) / 100
+    st.info("💰 **Amount Matching**: Amounts must match exactly to the last paisa/cent. Any difference will be flagged as a mismatch.")
+
+    # Amount tolerance fixed at 0 - exact match required
+    amount_tolerance = 0.0
     
     st.markdown("---")
     st.subheader("📖 About")
@@ -258,4 +254,3 @@ with tab3:
     """)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #666;'>Built for Brane Group</div>", unsafe_allow_html=True)

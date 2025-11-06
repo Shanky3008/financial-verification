@@ -231,9 +231,9 @@ class FinancialStatementParser:
 class ComparativesVerifier:
     """Verifies comparative figures between two financial statements"""
     
-    def __init__(self, similarity_threshold: float = 0.85, amount_tolerance: float = 0.01):
+    def __init__(self, similarity_threshold: float = 0.85, amount_tolerance: float = 0.0):
         self.similarity_threshold = similarity_threshold
-        self.amount_tolerance = amount_tolerance
+        self.amount_tolerance = amount_tolerance  # Always 0 for exact matching
     
     def verify(self, current_year_items: List[LineItem], 
                previous_year_items: List[LineItem]) -> List[ComparisonResult]:
@@ -315,20 +315,9 @@ class ComparativesVerifier:
         return SequenceMatcher(None, text1, text2).ratio()
     
     def _amounts_match(self, amount1: float, amount2: float) -> bool:
-        """Check if two amounts match within tolerance"""
-        if amount1 == amount2:
-            return True
-        
-        # Check percentage difference
-        if amount1 == 0 and amount2 == 0:
-            return True
-        
-        max_amount = max(abs(amount1), abs(amount2))
-        if max_amount == 0:
-            return True
-        
-        percentage_diff = abs(amount1 - amount2) / max_amount
-        return percentage_diff <= self.amount_tolerance
+        """Check if two amounts match exactly - no tolerance for financial statements"""
+        # For financial statements, amounts must match exactly
+        return amount1 == amount2
 
 
 class ReportGenerator:
