@@ -300,17 +300,37 @@ TEXT:
 
         result_text = response.choices[0].message.content.strip()
 
-        # Clean JSON
-        if result_text.startswith("```json"):
-            result_text = result_text[7:]
-        if result_text.startswith("```"):
-            result_text = result_text[3:]
-        if result_text.endswith("```"):
-            result_text = result_text[:-3]
+        # Clean JSON - remove markdown code blocks
+        if "```json" in result_text:
+            start = result_text.find("```json") + 7
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+        elif "```" in result_text:
+            start = result_text.find("```") + 3
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+
+        result_text = result_text.strip()
+
+        # Try to find JSON object if not at start
+        if not result_text.startswith('{'):
+            start_idx = result_text.find('{')
+            end_idx = result_text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                result_text = result_text[start_idx:end_idx+1]
 
         data = json.loads(result_text.strip())
+
+        # Validate structure
+        if 'line_items' not in data:
+            return {'success': False, 'error': 'Response missing "line_items" field'}
+
         return {'success': True, 'data': data, 'model': 'GPT-4o-mini'}
 
+    except json.JSONDecodeError as e:
+        return {'success': False, 'error': f'Invalid JSON: {str(e)}'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
@@ -339,17 +359,37 @@ TEXT:
 
         result_text = message.content[0].text.strip()
 
-        # Clean JSON
-        if result_text.startswith("```json"):
-            result_text = result_text[7:]
-        if result_text.startswith("```"):
-            result_text = result_text[3:]
-        if result_text.endswith("```"):
-            result_text = result_text[:-3]
+        # Clean JSON - remove markdown code blocks
+        if "```json" in result_text:
+            start = result_text.find("```json") + 7
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+        elif "```" in result_text:
+            start = result_text.find("```") + 3
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+
+        result_text = result_text.strip()
+
+        # Try to find JSON object if not at start
+        if not result_text.startswith('{'):
+            start_idx = result_text.find('{')
+            end_idx = result_text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                result_text = result_text[start_idx:end_idx+1]
 
         data = json.loads(result_text.strip())
+
+        # Validate structure
+        if 'line_items' not in data:
+            return {'success': False, 'error': 'Response missing "line_items" field'}
+
         return {'success': True, 'data': data, 'model': 'Claude Haiku'}
 
+    except json.JSONDecodeError as e:
+        return {'success': False, 'error': f'Invalid JSON: {str(e)}'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
@@ -402,19 +442,52 @@ Include confidence (0-1). Only confidence >= 0.8.
             )
             result_text = response.choices[0].message.content.strip()
 
-        # Clean JSON
-        if result_text.startswith("```json"):
-            result_text = result_text[7:]
-        if result_text.startswith("```"):
-            result_text = result_text[3:]
-        if result_text.endswith("```"):
-            result_text = result_text[:-3]
+        # Clean JSON - remove markdown code blocks
+        result_text = result_text.strip()
+
+        # Remove markdown code blocks
+        if "```json" in result_text:
+            start = result_text.find("```json") + 7
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+        elif "```" in result_text:
+            start = result_text.find("```") + 3
+            end = result_text.find("```", start)
+            if end != -1:
+                result_text = result_text[start:end]
+
+        result_text = result_text.strip()
+
+        # Check if we have content
+        if not result_text:
+            return {'success': False, 'error': 'LLM returned empty response'}
+
+        # Try to find JSON array in the response
+        if not result_text.startswith('['):
+            # Try to extract JSON array from text
+            start_idx = result_text.find('[')
+            end_idx = result_text.rfind(']')
+            if start_idx != -1 and end_idx != -1:
+                result_text = result_text[start_idx:end_idx+1]
+            else:
+                return {'success': False, 'error': f'No JSON array found in response. Got: {result_text[:200]}'}
 
         matches = json.loads(result_text.strip())
+
+        # Validate matches is a list
+        if not isinstance(matches, list):
+            return {'success': False, 'error': 'LLM did not return a JSON array'}
+
+        if len(matches) == 0:
+            return {'success': False, 'error': 'LLM returned empty matches array. Try adjusting the PDF quality or use CSV version.'}
+
         return {'success': True, 'matches': matches}
 
+    except json.JSONDecodeError as e:
+        return {'success': False, 'error': f'Invalid JSON from LLM: {str(e)}. Response: {result_text[:200] if result_text else "empty"}'}
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': f'Error: {str(e)}'}
 
 def verify_amounts_exact(matches):
     """Python verification of exact amounts (100% accurate)"""
