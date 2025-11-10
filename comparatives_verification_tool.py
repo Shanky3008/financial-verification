@@ -28,6 +28,7 @@ class LineItem:
     original_text: str
     row_number: int
     note_reference: Optional[str] = None
+    statement_type: Optional[str] = None  # Sheet name or statement type
 
 
 @dataclass
@@ -40,6 +41,7 @@ class ComparisonResult:
     difference: Optional[float]
     similarity_score: float
     status: str  # 'MATCH', 'MISMATCH', 'ADDED', 'DELETED'
+    statement_type: Optional[str] = None  # Sheet name or statement type
 
 
 class FinancialStatementParser:
@@ -119,7 +121,8 @@ class FinancialStatementParser:
                     description=description,
                     amount=amounts[-1] if len(amounts) > 1 else amounts[0],
                     original_text=" | ".join(str(c) for c in row if c),
-                    row_number=page_num * 1000 + row_idx
+                    row_number=page_num * 1000 + row_idx,
+                    statement_type="PDF Content"  # PDFs don't have sheet names
                 )
                 items.append(item)
         
@@ -144,7 +147,8 @@ class FinancialStatementParser:
                         description=description,
                         amount=amounts[-1],  # Last amount is usually comparative
                         original_text=line,
-                        row_number=page_num * 1000 + idx
+                        row_number=page_num * 1000 + idx,
+                        statement_type="PDF Content"  # PDFs don't have sheet names
                     )
                     items.append(item)
         
@@ -175,7 +179,8 @@ class FinancialStatementParser:
                 description=description,
                 amount=amounts[-1],  # Last column usually has comparatives
                 original_text=" | ".join(str(c) for c in row if c),
-                row_number=row_idx
+                row_number=row_idx,
+                statement_type=sheet_name  # Use Excel sheet name as statement type
             )
         
         return None
@@ -279,7 +284,8 @@ class ComparativesVerifier:
                     matches=matches,
                     difference=difference,
                     similarity_score=best_score,
-                    status='MATCH' if matches else 'MISMATCH'
+                    status='MATCH' if matches else 'MISMATCH',
+                    statement_type=curr_item.statement_type  # Use sheet name from Excel
                 )
             else:
                 # Line item added in current year
@@ -290,7 +296,8 @@ class ComparativesVerifier:
                     matches=False,
                     difference=None,
                     similarity_score=best_score,
-                    status='ADDED'
+                    status='ADDED',
+                    statement_type=curr_item.statement_type  # Use sheet name from Excel
                 )
             
             results.append(result)
@@ -305,7 +312,8 @@ class ComparativesVerifier:
                     matches=False,
                     difference=None,
                     similarity_score=0.0,
-                    status='DELETED'
+                    status='DELETED',
+                    statement_type=prev_item.statement_type  # Use sheet name from Excel
                 )
                 results.append(result)
         
@@ -320,9 +328,13 @@ class ComparativesVerifier:
         return SequenceMatcher(None, text1, text2).ratio()
     
     def _amounts_match(self, amount1: float, amount2: float) -> bool:
-        """Check if two amounts match exactly - no tolerance for financial statements"""
-        # For financial statements, amounts must match exactly
-        return amount1 == amount2
+        """
+        Check if two amounts match with proper float comparison.
+        Uses 1 cent/paisa tolerance to handle floating-point precision issues.
+        """
+        # Use small tolerance (0.01) for floating-point precision
+        # This handles cases like 0.1 + 0.2 != 0.3 due to binary representation
+        return abs(amount1 - amount2) < 0.01
 
 
 class ReportGenerator:

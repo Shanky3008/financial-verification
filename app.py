@@ -53,6 +53,48 @@ def normalize_text(text):
         return ""
     return str(text).strip().lower().replace("  ", " ")
 
+def sanitize_for_excel(text):
+    """
+    Sanitize text to prevent CSV/Excel formula injection.
+    Formulas start with: = + - @ | %
+    """
+    if pd.isna(text) or text is None:
+        return ""
+
+    text_str = str(text).strip()
+
+    # Check if first character is a formula trigger
+    if text_str and text_str[0] in ('=', '+', '-', '@', '|', '%'):
+        # Prepend single quote to prevent formula execution
+        return "'" + text_str
+
+    return text_str
+
+def validate_file_size(uploaded_file, max_size_mb=50):
+    """
+    Validate file size to prevent DoS attacks.
+    Returns True if valid, False otherwise.
+    """
+    if uploaded_file is None:
+        return True
+
+    # Get file size
+    uploaded_file.seek(0, 2)  # Seek to end
+    file_size = uploaded_file.tell()
+    uploaded_file.seek(0)  # Reset to beginning
+
+    max_size_bytes = max_size_mb * 1024 * 1024
+
+    if file_size > max_size_bytes:
+        st.error(f"❌ File too large: {file_size / (1024*1024):.1f} MB. Maximum allowed: {max_size_mb} MB")
+        return False
+
+    if file_size == 0:
+        st.error("❌ File is empty")
+        return False
+
+    return True
+
 def calculate_similarity(str1, str2):
     """Calculate similarity between two strings using Levenshtein distance"""
     return SequenceMatcher(None, normalize_text(str1), normalize_text(str2)).ratio()
@@ -126,12 +168,24 @@ def extract_financial_data_csv(uploaded_file):
         # Clean the data
         df['line_item'] = df['line_item'].fillna('').astype(str).str.strip()
 
-        # Convert amount to numeric
+        # Convert amount to numeric with validation
         def clean_amount(val):
             if pd.isna(val) or val == '' or val == '-':
                 return np.nan
             try:
-                return float(str(val).replace(',', '').strip())
+                amount = float(str(val).replace(',', '').strip())
+
+                # Validate amount is reasonable
+                import math
+                if math.isinf(amount):
+                    st.warning(f"⚠️ Invalid amount (infinity) found and skipped: {val}")
+                    return np.nan
+                if math.isnan(amount):
+                    return np.nan
+                if abs(amount) > 1e15:  # 1 quadrillion - unreasonably large
+                    st.warning(f"⚠️ Extremely large amount found: {val:,.2f} - please verify")
+
+                return amount
             except:
                 return np.nan
 
@@ -208,7 +262,8 @@ def match_line_items_csv(cy_df, py_df, similarity_threshold):
                 status = "MISMATCH"
 
         results.append({
-            'Line Item': cy_item,
+            'Statement Type': sanitize_for_excel('CSV Data'),
+            'Line Item': sanitize_for_excel(cy_item),  # Prevent formula injection
             'Current Year': cy_amount,
             'Previous Year': py_amount,
             'Difference': difference,
@@ -220,7 +275,8 @@ def match_line_items_csv(cy_df, py_df, similarity_threshold):
     for py_idx, py_row in py_df.iterrows():
         if py_idx not in matched_py_indices:
             results.append({
-                'Line Item': py_row['line_item'],
+                'Statement Type': sanitize_for_excel('CSV Data'),
+                'Line Item': sanitize_for_excel(py_row['line_item']),  # Prevent formula injection
                 'Current Year': np.nan,
                 'Previous Year': py_row['amount'],
                 'Difference': np.nan,
@@ -529,8 +585,8 @@ def verify_amounts_exact(matches):
             status = status + "_LOW_CONF"
 
         results.append({
-            'Statement Type': statement_type,
-            'Line Item': match.get('cy_item'),
+            'Statement Type': sanitize_for_excel(statement_type),
+            'Line Item': sanitize_for_excel(match.get('cy_item')),  # Prevent formula injection
             'Current Year': cy_amount,
             'Previous Year': py_amount,
             'Difference': difference,
@@ -636,6 +692,10 @@ Goodwill,13139""")
         st.markdown("---")
 
         if st.button("🔍 Compare (CSV)", type="primary", use_container_width=True):
+            # Validate file sizes
+            if not validate_file_size(cy_file_csv) or not validate_file_size(py_file_csv):
+                st.stop()
+
             with st.spinner("Processing..."):
                 cy_df = extract_financial_data_csv(cy_file_csv)
                 py_df = extract_financial_data_csv(py_file_csv)
@@ -780,6 +840,10 @@ with tab2:
         st.markdown("---")
 
         if st.button("🤖 Extract & Compare (LLM)", type="primary", use_container_width=True):
+            # Validate file sizes
+            if not validate_file_size(cy_file_pdf) or not validate_file_size(py_file_pdf):
+                st.stop()
+
             with st.spinner("Extracting PDFs with LLM..."):
 
                 # Extract PDFs
