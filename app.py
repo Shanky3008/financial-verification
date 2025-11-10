@@ -31,7 +31,7 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 try:
-    import PyMuPDF as fitz
+    import fitz  # PyMuPDF
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
