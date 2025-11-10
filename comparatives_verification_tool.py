@@ -72,17 +72,22 @@ class FinancialStatementParser:
     def parse_excel(self, file_path: str) -> List[LineItem]:
         """Extract line items from Excel financial statements"""
         line_items = []
-        
+
         try:
-            wb = openpyxl.load_workbook(file_path)
+            wb = openpyxl.load_workbook(file_path, data_only=True)  # data_only=True gets values, not formulas
             for sheet in wb.worksheets:
+                # Skip hidden sheets
+                if sheet.sheet_state == 'hidden':
+                    logger.info(f"Skipping hidden sheet: {sheet.title}")
+                    continue
+
                 for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
                     item = self._parse_excel_row(row, row_idx, sheet.title)
                     if item:
                         line_items.append(item)
         except Exception as e:
             logger.error(f"Error parsing Excel: {e}")
-        
+
         return line_items
     
     def _parse_table(self, table: List[List], page_num: int) -> List[LineItem]:

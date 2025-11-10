@@ -258,32 +258,38 @@ def extract_pdf_text(pdf_file):
 
 def call_gpt4_extraction(pages_text, year_label, api_key):
     """Use GPT-4o-mini to extract financial data"""
-    combined_text = "\n\n".join([p['text'] for p in pages_text[:20]])
+    # Use all pages, increase character limit
+    combined_text = "\n\n".join([p['text'] for p in pages_text])
 
     prompt = f"""You are a financial analyst extracting data from annual reports.
 
 Extract financial statements from this {year_label} annual report:
 - Balance Sheet (Assets, Liabilities, Equity)
 - Income Statement (Revenue, Expenses, Profit)
+- Cash Flow Statement
 
 For each line item extract:
 1. Exact line item name
 2. Amount (number, no commas)
-3. Whether it's a header or actual amount
+3. Statement type (Balance Sheet, Income Statement, Cash Flow Statement, or Other)
 
 Return ONLY valid JSON:
 {{
   "line_items": [
-    {{"line_item": "Property plant and equipment", "amount": 72984}},
-    {{"line_item": "Goodwill", "amount": 13139}},
+    {{"line_item": "Property plant and equipment", "amount": 72984, "statement_type": "Balance Sheet"}},
+    {{"line_item": "Revenue from operations", "amount": 13139, "statement_type": "Income Statement"}},
     ...
   ]
 }}
 
-CRITICAL: Extract ONLY from {year_label} column. Skip headers, page numbers, note references.
+CRITICAL:
+- Extract ONLY from {year_label} column
+- Skip headers, page numbers, note references
+- Include statement_type for categorization
+- Process ALL pages provided
 
 TEXT:
-{combined_text[:15000]}
+{combined_text[:25000]}
 """
 
     try:
@@ -336,16 +342,22 @@ TEXT:
 
 def call_claude_extraction(pages_text, year_label, api_key):
     """Use Claude Haiku to extract financial data"""
-    combined_text = "\n\n".join([p['text'] for p in pages_text[:20]])
+    # Use all pages, increase character limit
+    combined_text = "\n\n".join([p['text'] for p in pages_text])
 
     prompt = f"""Extract financial statements from {year_label} annual report.
 
-Return JSON: {{"line_items": [{{"line_item": "name", "amount": number}}, ...]}}
+Include Balance Sheet, Income Statement, and Cash Flow items.
 
-Extract ONLY from {year_label} column.
+Return JSON: {{"line_items": [{{"line_item": "name", "amount": number, "statement_type": "Balance Sheet|Income Statement|Cash Flow Statement|Other"}}, ...]}}
+
+CRITICAL:
+- Extract ONLY from {year_label} column
+- Include statement_type for each item
+- Process ALL pages
 
 TEXT:
-{combined_text[:15000]}
+{combined_text[:25000]}
 """
 
     try:
@@ -399,10 +411,10 @@ def match_items_with_llm(cy_items, py_items, api_key, use_claude=False):
     prompt = f"""Match financial line items between years.
 
 CURRENT YEAR:
-{json.dumps(cy_items, indent=2)[:3000]}
+{json.dumps(cy_items, indent=2)[:4000]}
 
 PREVIOUS YEAR:
-{json.dumps(py_items, indent=2)[:3000]}
+{json.dumps(py_items, indent=2)[:4000]}
 
 Return JSON array of matches:
 [
@@ -411,12 +423,16 @@ Return JSON array of matches:
     "cy_amount": 72984,
     "py_item": "Property, plant & equipment",
     "py_amount": 62487,
+    "statement_type": "Balance Sheet",
     "confidence": 0.95
   }},
   ...
 ]
 
-Include confidence (0-1). Only confidence >= 0.8.
+CRITICAL:
+- Include statement_type from the items (Balance Sheet, Income Statement, Cash Flow Statement, or Other)
+- Include confidence (0-1). Only confidence >= 0.8
+- Verify both items are from the SAME statement type before matching
 """
 
     try:
@@ -497,6 +513,7 @@ def verify_amounts_exact(matches):
         cy_amount = match.get('cy_amount')
         py_amount = match.get('py_amount')
         confidence = match.get('confidence', 1.0)
+        statement_type = match.get('statement_type', 'Other')
 
         if cy_amount is None or py_amount is None:
             continue
@@ -512,6 +529,7 @@ def verify_amounts_exact(matches):
             status = status + "_LOW_CONF"
 
         results.append({
+            'Statement Type': statement_type,
             'Line Item': match.get('cy_item'),
             'Current Year': cy_amount,
             'Previous Year': py_amount,
@@ -521,6 +539,40 @@ def verify_amounts_exact(matches):
         })
 
     return pd.DataFrame(results)
+
+def validate_year_consistency(cy_items, py_items):
+    """
+    Validate that extracted items are from correct year columns.
+    Returns warnings if potential issues detected.
+    """
+    warnings = []
+
+    # Check if we have data
+    if not cy_items or not py_items:
+        warnings.append("⚠️ Missing data from one or both years")
+        return warnings
+
+    # Basic validation: Check if amounts look reasonable
+    cy_amounts = [item.get('amount', 0) for item in cy_items if item.get('amount')]
+    py_amounts = [item.get('amount', 0) for item in py_items if item.get('amount')]
+
+    if len(cy_amounts) == 0:
+        warnings.append("⚠️ No amounts found in Current Year - check PDF extraction")
+    if len(py_amounts) == 0:
+        warnings.append("⚠️ No amounts found in Previous Year - check PDF extraction")
+
+    # Check for suspicious similarity (might indicate wrong column extraction)
+    if cy_amounts and py_amounts:
+        # If more than 50% of amounts are identical, might be extracting same column
+        cy_set = set(cy_amounts)
+        py_set = set(py_amounts)
+        overlap = len(cy_set.intersection(py_set))
+        overlap_ratio = overlap / max(len(cy_set), len(py_set))
+
+        if overlap_ratio > 0.7:
+            warnings.append("⚠️ High similarity between years detected - verify correct columns are being extracted")
+
+    return warnings
 
 # ==================== MAIN UI ====================
 
@@ -749,6 +801,14 @@ with tab2:
                         cy_items = cy_result['data'].get('line_items', [])
                         py_items = py_result['data'].get('line_items', [])
 
+                        # Validate year consistency
+                        validation_warnings = validate_year_consistency(cy_items, py_items)
+                        if validation_warnings:
+                            for warning in validation_warnings:
+                                st.warning(warning)
+
+                        st.info(f"📊 Extracted {len(cy_items)} items from Current Year and {len(py_items)} items from Previous Year")
+
                         # Match with LLM
                         match_result = match_items_with_llm(cy_items, py_items, api_key_llm, use_claude)
 
@@ -770,7 +830,34 @@ with tab2:
                             cols[1].metric("✅ Exact Match", matches)
                             cols[2].metric("❌ Mismatch", mismatches)
 
-                            st.dataframe(results_df, use_container_width=True, height=400)
+                            # Filter by statement type
+                            st.markdown("#### Filter Results")
+                            statement_types = results_df['Statement Type'].unique().tolist()
+                            selected_types = st.multiselect(
+                                "Filter by Statement Type",
+                                statement_types,
+                                default=statement_types,
+                                key='llm_statement_filter'
+                            )
+
+                            filtered_df = results_df[results_df['Statement Type'].isin(selected_types)]
+
+                            # Display grouped by statement type
+                            for stmt_type in selected_types:
+                                stmt_df = filtered_df[filtered_df['Statement Type'] == stmt_type]
+                                if len(stmt_df) > 0:
+                                    st.markdown(f"##### {stmt_type}")
+
+                                    # Statement-specific statistics
+                                    stmt_matches = len(stmt_df[stmt_df['Status'].str.contains('MATCH')])
+                                    stmt_mismatches = len(stmt_df[stmt_df['Status'].str.contains('MISMATCH')])
+
+                                    col1, col2, col3 = st.columns(3)
+                                    col1.metric("Items", len(stmt_df))
+                                    col2.metric("Matches", stmt_matches)
+                                    col3.metric("Mismatches", stmt_mismatches)
+
+                                    st.dataframe(stmt_df, use_container_width=True, height=300)
 
                             # Download
                             excel = generate_excel_report(results_df, "llm_comparison")
