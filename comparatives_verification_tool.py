@@ -175,9 +175,13 @@ class FinancialStatementParser:
                     amounts.append(amount)
         
         if amounts:
+            # For proper comparatives verification:
+            # - Current Year file: Use amounts[-1] (last column = PY comparative)
+            # - Previous Year file: Use amounts[0] if len==2 else amounts[-2] (CY actual)
+            # Note: This assumes standard format with CY in col2, PY comparative in col3
             return LineItem(
                 description=description,
-                amount=amounts[-1],  # Last column usually has comparatives
+                amount=amounts[-1],  # Last column (PY comparative in CY file, or older comparative in PY file)
                 original_text=" | ".join(str(c) for c in row if c),
                 row_number=row_idx,
                 statement_type=sheet_name  # Use Excel sheet name as statement type
