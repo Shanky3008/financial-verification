@@ -206,6 +206,199 @@ def parse_amount_robust(amount_raw):
     except ValueError:
         return np.nan
 
+# ==================== PHASE 2: STRUCTURE & VALIDATION ====================
+
+def detect_hierarchy_level(text):
+    """
+    Detect hierarchical level based on indentation and structure
+    Returns: (level, cleaned_text)
+
+    Level 0: Main sections (ASSETS, LIABILITIES)
+    Level 1: Sub-sections (Current Assets, Non-Current Assets)
+    Level 2: Line items (Cash and equivalents, Trade receivables)
+    Level 3: Sub-items (Domestic receivables, Export receivables)
+    """
+    if pd.isna(text) or not text:
+        return (0, "")
+
+    original = str(text)
+
+    # Count leading spaces/tabs
+    leading_spaces = len(original) - len(original.lstrip())
+
+    # Normalize text
+    cleaned = original.strip()
+
+    # Check for numbering patterns
+    # "1. SHARE CAPITAL" = Level 1
+    # "1.1 Equity shares" = Level 2
+    # "1.1.1 Detail" = Level 3
+    numbering_pattern = r'^(\d+(?:\.\d+)*)\s+'
+    match = re.match(numbering_pattern, cleaned)
+    if match:
+        dots = match.group(1).count('.')
+        level = min(dots + 1, 3)
+        cleaned = re.sub(numbering_pattern, '', cleaned).strip()
+        return (level, cleaned)
+
+    # Check if all caps (likely main section)
+    if cleaned.isupper() and len(cleaned.split()) <= 5:
+        return (0, cleaned)
+
+    # Use indentation (every 2-4 spaces = 1 level)
+    if leading_spaces >= 8:
+        return (3, cleaned)
+    elif leading_spaces >= 4:
+        return (2, cleaned)
+    elif leading_spaces >= 2:
+        return (1, cleaned)
+
+    return (0, cleaned)
+
+def validate_totals(df, tolerance=0.01):
+    """
+    Validate that totals match sum of their components
+
+    Returns: list of validation issues
+    """
+    issues = []
+
+    if 'hierarchy_level' not in df.columns or 'line_item' not in df.columns:
+        return issues
+
+    # Find total/subtotal rows
+    total_rows = df[df['line_item'].apply(is_total_or_subtotal)].copy()
+
+    for idx, total_row in total_rows.iterrows():
+        total_amount = total_row['amount']
+        total_level = total_row.get('hierarchy_level', 0)
+        total_text = total_row['line_item']
+
+        # Find component items (same or higher level, before next total)
+        components = []
+        found_components = False
+
+        # Look backwards from total to find components
+        for back_idx in range(idx - 1, -1, -1):
+            item_row = df.iloc[back_idx]
+            item_level = item_row.get('hierarchy_level', 0)
+            item_text = item_row['line_item']
+
+            # Stop if we hit another total at same or lower level
+            if is_total_or_subtotal(item_text) and item_level <= total_level:
+                break
+
+            # Include items at higher level (more indented)
+            if item_level > total_level:
+                components.append(item_row['amount'])
+                found_components = True
+
+        if found_components and len(components) > 0:
+            components_sum = sum(components)
+
+            if abs(total_amount - components_sum) > tolerance:
+                issues.append({
+                    'type': 'total_mismatch',
+                    'total_item': total_text,
+                    'total_amount': total_amount,
+                    'components_sum': components_sum,
+                    'difference': total_amount - components_sum,
+                    'component_count': len(components)
+                })
+
+    return issues
+
+def detect_duplicates(df):
+    """
+    Detect duplicate line items within the same statement
+
+    Returns: list of duplicate groups
+    """
+    duplicates = []
+
+    if 'line_item' not in df.columns:
+        return duplicates
+
+    # Group by normalized line item and statement type
+    df_normalized = df.copy()
+    df_normalized['normalized_item'] = df_normalized['line_item'].apply(normalize_text)
+
+    # Add statement_type if available
+    group_cols = ['normalized_item']
+    if 'statement_type' in df.columns:
+        group_cols.append('statement_type')
+
+    grouped = df_normalized.groupby(group_cols)
+
+    for name, group in grouped:
+        if len(group) > 1:
+            # Check if amounts are different (true duplicates vs. intentional repetition)
+            amounts = group['amount'].tolist()
+            if len(set(amounts)) > 1:
+                duplicates.append({
+                    'item': name[0] if isinstance(name, tuple) else name,
+                    'occurrences': len(group),
+                    'amounts': amounts,
+                    'statement_type': name[1] if isinstance(name, tuple) and len(name) > 1 else 'Unknown'
+                })
+
+    return duplicates
+
+def validate_balance_sheet_balancing(df):
+    """
+    Validate that Assets = Liabilities + Equity
+
+    Returns: validation result dict
+    """
+    result = {
+        'balanced': True,
+        'assets': 0,
+        'liabilities': 0,
+        'equity': 0,
+        'difference': 0,
+        'details': ''
+    }
+
+    if 'statement_type' not in df.columns:
+        result['details'] = 'No statement_type column available'
+        return result
+
+    # Filter balance sheet items
+    bs_df = df[df['statement_type'].str.contains('Balance Sheet', case=False, na=False)].copy()
+
+    if len(bs_df) == 0:
+        result['details'] = 'No Balance Sheet items found'
+        return result
+
+    # Calculate totals by category
+    for _, row in bs_df.iterrows():
+        item_upper = row['line_item'].upper()
+        amount = row['amount']
+
+        # Identify if this is a total line for assets, liabilities, or equity
+        if 'TOTAL' in item_upper:
+            if 'ASSET' in item_upper:
+                result['assets'] = max(result['assets'], abs(amount))
+            elif 'LIABILIT' in item_upper and 'EQUITY' not in item_upper:
+                result['liabilities'] = max(result['liabilities'], abs(amount))
+            elif 'EQUITY' in item_upper or 'SHAREHOLDER' in item_upper:
+                result['equity'] = max(result['equity'], abs(amount))
+            elif 'LIABILIT' in item_upper and 'EQUITY' in item_upper:
+                # "Total Liabilities and Equity"
+                liab_equity_total = abs(amount)
+                result['difference'] = result['assets'] - liab_equity_total
+                result['balanced'] = abs(result['difference']) < 0.01
+                result['details'] = f"Assets: {result['assets']:,.2f}, Liabilities+Equity: {liab_equity_total:,.2f}"
+                return result
+
+    # Manual calculation if no combined total found
+    liab_equity_total = result['liabilities'] + result['equity']
+    result['difference'] = result['assets'] - liab_equity_total
+    result['balanced'] = abs(result['difference']) < 0.01
+    result['details'] = f"Assets: {result['assets']:,.2f}, Liabilities: {result['liabilities']:,.2f}, Equity: {result['equity']:,.2f}"
+
+    return result
+
 def sanitize_for_excel(text):
     """
     Sanitize text to prevent CSV/Excel formula injection.
@@ -372,8 +565,19 @@ def extract_financial_data_csv(uploaded_file, column_to_extract='last'):
         if filtered_count > 0:
             st.info(f"📋 Filtered out {filtered_count} rows (headers, empty amounts, etc.)")
 
+        # Phase 2: Add hierarchy detection
+        df[['hierarchy_level', 'cleaned_item']] = df['line_item'].apply(
+            lambda x: pd.Series(detect_hierarchy_level(x))
+        )
+
+        # Add statement_type if not present (default to "Unknown")
+        if 'statement_type' not in df.columns:
+            df['statement_type'] = 'Unknown'
+
         st.success(f"✅ Loaded {len(df)} valid line items from '{amount_col}' column")
-        return df[['line_item', 'amount']]
+
+        # Return with enhanced columns
+        return df[['line_item', 'amount', 'hierarchy_level', 'statement_type']]
 
     except Exception as e:
         st.error(f"Error reading CSV: {str(e)}")
@@ -928,6 +1132,80 @@ Goodwill,13139""")
                 py_df = extract_financial_data_csv(py_file_csv, column_to_extract='first')
 
                 if cy_df is not None and py_df is not None:
+                    # ==================== PHASE 2: DATA VALIDATION ====================
+                    st.markdown("### 🔍 Data Quality Validation")
+
+                    validation_col1, validation_col2 = st.columns(2)
+
+                    with validation_col1:
+                        st.markdown("**Current Year File**")
+
+                        # Check for duplicates
+                        cy_duplicates = detect_duplicates(cy_df)
+                        if cy_duplicates:
+                            st.warning(f"⚠️ Found {len(cy_duplicates)} duplicate line items")
+                            with st.expander("View Duplicates"):
+                                for dup in cy_duplicates:
+                                    st.write(f"- {dup['item']}: {dup['occurrences']} occurrences with amounts {dup['amounts']}")
+                        else:
+                            st.success("✅ No duplicates found")
+
+                        # Validate totals
+                        cy_total_issues = validate_totals(cy_df)
+                        if cy_total_issues:
+                            st.warning(f"⚠️ Found {len(cy_total_issues)} total mismatches")
+                            with st.expander("View Total Mismatches"):
+                                for issue in cy_total_issues:
+                                    st.write(f"- {issue['total_item']}: Total={issue['total_amount']:,.2f}, Sum={issue['components_sum']:,.2f}, Diff={issue['difference']:,.2f}")
+                        else:
+                            st.success("✅ All totals validated")
+
+                        # Balance sheet check
+                        cy_balance = validate_balance_sheet_balancing(cy_df)
+                        if cy_balance['details']:
+                            if cy_balance['balanced']:
+                                st.success(f"✅ Balance sheet balanced")
+                                st.caption(cy_balance['details'])
+                            else:
+                                st.warning(f"⚠️ Balance sheet not balanced")
+                                st.caption(f"{cy_balance['details']} (Diff: {cy_balance['difference']:,.2f})")
+
+                    with validation_col2:
+                        st.markdown("**Previous Year File**")
+
+                        # Check for duplicates
+                        py_duplicates = detect_duplicates(py_df)
+                        if py_duplicates:
+                            st.warning(f"⚠️ Found {len(py_duplicates)} duplicate line items")
+                            with st.expander("View Duplicates"):
+                                for dup in py_duplicates:
+                                    st.write(f"- {dup['item']}: {dup['occurrences']} occurrences with amounts {dup['amounts']}")
+                        else:
+                            st.success("✅ No duplicates found")
+
+                        # Validate totals
+                        py_total_issues = validate_totals(py_df)
+                        if py_total_issues:
+                            st.warning(f"⚠️ Found {len(py_total_issues)} total mismatches")
+                            with st.expander("View Total Mismatches"):
+                                for issue in py_total_issues:
+                                    st.write(f"- {issue['total_item']}: Total={issue['total_amount']:,.2f}, Sum={issue['components_sum']:,.2f}, Diff={issue['difference']:,.2f}")
+                        else:
+                            st.success("✅ All totals validated")
+
+                        # Balance sheet check
+                        py_balance = validate_balance_sheet_balancing(py_df)
+                        if py_balance['details']:
+                            if py_balance['balanced']:
+                                st.success(f"✅ Balance sheet balanced")
+                                st.caption(py_balance['details'])
+                            else:
+                                st.warning(f"⚠️ Balance sheet not balanced")
+                                st.caption(f"{py_balance['details']} (Diff: {py_balance['difference']:,.2f})")
+
+                    st.markdown("---")
+
+                    # ==================== COMPARISON ====================
                     results_df = match_line_items_csv(cy_df, py_df, similarity_threshold_csv)
 
                     # Statistics
