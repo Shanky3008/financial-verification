@@ -16,6 +16,7 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from datetime import datetime
 import json
+import re
 
 # LLM-specific imports (optional - will check if available)
 try:
@@ -52,6 +53,158 @@ def normalize_text(text):
     if pd.isna(text) or text is None:
         return ""
     return str(text).strip().lower().replace("  ", " ")
+
+def is_section_header(text):
+    """Enhanced header detection"""
+    if pd.isna(text) or not text:
+        return False
+
+    text_clean = str(text).strip().upper()
+
+    # Section header patterns
+    header_patterns = [
+        r'^ASSETS?$', r'^LIABILITIES?$', r'^EQUITY$',
+        r'^SHAREHOLDERS?\' EQUITY$', r'^NON[- ]?CURRENT ASSETS?$',
+        r'^CURRENT ASSETS?$', r'^NON[- ]?CURRENT LIABILITIES?$',
+        r'^CURRENT LIABILITIES?$', r'^INCOME STATEMENT$',
+        r'^REVENUE$', r'^EXPENSES?$', r'^OTHER INCOME$',
+        r'^CASH FLOWS? FROM', r'^OPERATING ACTIVITIES$',
+        r'^INVESTING ACTIVITIES$', r'^FINANCING ACTIVITIES$',
+        r'^PARTICULARS?$', r'^DESCRIPTION$', r'^NOTE$',
+        r'^\d+\.\s*[A-Z]',  # "1. SHARE CAPITAL"
+    ]
+
+    for pattern in header_patterns:
+        if re.match(pattern, text_clean):
+            return True
+
+    # Check if all caps and short (likely header)
+    if text_clean == str(text).strip() and len(text.split()) <= 5 and text_clean.isupper():
+        return True
+
+    return False
+
+def is_total_or_subtotal(text):
+    """Detect total/subtotal lines"""
+    if pd.isna(text) or not text:
+        return False
+
+    text_upper = str(text).upper().strip()
+
+    total_patterns = [
+        r'^TOTAL', r'^GRAND TOTAL', r'TOTAL$',
+        r'^SUB[- ]?TOTAL', r'^NET\s+', r'^GROSS\s+',
+        r'^AGGREGATE',
+    ]
+
+    for pattern in total_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+def parse_amount_robust(amount_raw):
+    """
+    Robust amount parser handling multiple formats
+
+    Handles:
+    - Different formats: 1,234.56 vs 1.234,56
+    - Negatives: (1000), -1000, 1000-, 1000 DR
+    - Currency symbols: $, £, ₹, €
+    - Word multipliers: crore, lakh, million, thousand
+    """
+    if pd.isna(amount_raw) or amount_raw == '' or amount_raw == '-':
+        return np.nan
+
+    text = str(amount_raw).strip()
+    is_negative = False
+
+    # Check for debit/credit notation
+    if re.search(r'\b(DR|DEBIT)\b', text, re.IGNORECASE):
+        is_negative = True
+        text = re.sub(r'\s+(DR|DEBIT)\b', '', text, flags=re.IGNORECASE)
+    if re.search(r'\b(CR|CREDIT)\b', text, re.IGNORECASE):
+        text = re.sub(r'\s+(CR|CREDIT)\b', '', text, flags=re.IGNORECASE)
+
+    # Parentheses for negatives
+    if text.startswith('(') and text.endswith(')'):
+        is_negative = True
+        text = text[1:-1]
+    elif text.startswith('[') and text.endswith(']'):
+        is_negative = True
+        text = text[1:-1]
+
+    # Trailing minus
+    if text.endswith('-'):
+        is_negative = True
+        text = text[:-1]
+
+    # Remove currency symbols
+    text = re.sub(r'[$£₹€¥]', '', text)
+
+    # Handle word multipliers
+    multiplier = 1.0
+    text_upper = text.upper()
+
+    if re.search(r'\bCRORE', text_upper):
+        multiplier = 10000000
+        text = re.sub(r'\s*CRORE\s*', '', text, flags=re.IGNORECASE)
+    elif re.search(r'\bLAKH', text_upper) or re.search(r'\bLAC\b', text_upper):
+        multiplier = 100000
+        text = re.sub(r'\s*(LAKH|LAC)\s*', '', text, flags=re.IGNORECASE)
+    elif re.search(r'\bMILLION', text_upper):
+        multiplier = 1000000
+        text = re.sub(r'\s*MILLION\s*', '', text, flags=re.IGNORECASE)
+    elif re.search(r'\bTHOUSAND', text_upper):
+        multiplier = 1000
+        text = re.sub(r'\s*THOUSAND\s*', '', text, flags=re.IGNORECASE)
+
+    # Normalize number format
+    text = text.strip()
+
+    # Handle both comma and dot
+    if ',' in text and '.' in text:
+        last_comma = text.rfind(',')
+        last_dot = text.rfind('.')
+
+        if last_dot > last_comma:
+            # US format: 1,234.56
+            text = text.replace(',', '')
+        else:
+            # European format: 1.234,56
+            text = text.replace('.', '').replace(',', '.')
+    elif ',' in text:
+        # Only comma
+        if text.count(',') > 1:
+            # Multiple commas = thousands: 1,234,567
+            text = text.replace(',', '')
+        else:
+            # Single comma - check if decimal or thousands
+            parts = text.split(',')
+            if len(parts) > 1 and len(parts[1]) == 3:
+                # Likely thousands: 1,000
+                text = text.replace(',', '')
+            elif len(parts) > 1 and len(parts[1]) <= 2:
+                # Likely decimal: 123,45
+                text = text.replace(',', '.')
+
+    # Parse to float
+    try:
+        amount = float(text) * multiplier
+
+        # Validate
+        import math
+        if math.isinf(amount):
+            return np.nan
+        if math.isnan(amount):
+            return np.nan
+        if abs(amount) > 1e15:
+            st.warning(f"⚠️ Very large amount: {amount:,.2f}")
+
+        return -amount if is_negative else amount
+
+    except ValueError:
+        return np.nan
 
 def sanitize_for_excel(text):
     """
@@ -195,33 +348,31 @@ def extract_financial_data_csv(uploaded_file, column_to_extract='last'):
 
         st.info(f"📊 Extracting from: {col_description} - Column '{amount_col}'")
 
-        # Convert amount to numeric with validation
-        def clean_amount(val):
-            if pd.isna(val) or val == '' or val == '-':
-                return np.nan
-            try:
-                amount = float(str(val).replace(',', '').strip())
+        # Parse amounts using robust parser
+        df['amount'] = df[amount_col].apply(parse_amount_robust)
 
-                # Validate amount is reasonable
-                import math
-                if math.isinf(amount):
-                    st.warning(f"⚠️ Invalid amount (infinity) found and skipped: {val}")
-                    return np.nan
-                if math.isnan(amount):
-                    return np.nan
-                if abs(amount) > 1e15:  # 1 quadrillion - unreasonably large
-                    st.warning(f"⚠️ Extremely large amount found: {val:,.2f} - please verify")
+        # Filter data
+        initial_count = len(df)
 
-                return amount
-            except:
-                return np.nan
+        # Remove rows with empty line items
+        df = df[df['line_item'] != ''].copy()
 
-        df['amount'] = df[amount_col].apply(clean_amount)
+        # Remove section headers
+        df = df[~df['line_item'].apply(is_section_header)].copy()
 
-        # Remove empty rows
-        df = df[df['line_item'] != ''].reset_index(drop=True)
+        # Remove rows without valid amounts
+        df = df[df['amount'].notna()].copy()
 
-        st.success(f"✅ Loaded {len(df)} line items from '{amount_col}' column")
+        # Remove zero amounts (optional - can be configured)
+        # df = df[df['amount'] != 0].copy()
+
+        df = df.reset_index(drop=True)
+
+        filtered_count = initial_count - len(df)
+        if filtered_count > 0:
+            st.info(f"📋 Filtered out {filtered_count} rows (headers, empty amounts, etc.)")
+
+        st.success(f"✅ Loaded {len(df)} valid line items from '{amount_col}' column")
         return df[['line_item', 'amount']]
 
     except Exception as e:
