@@ -153,8 +153,15 @@ def generate_excel_report(results_df, filename_prefix="comparison"):
 
 # ==================== CSV VERSION FUNCTIONS ====================
 
-def extract_financial_data_csv(uploaded_file):
-    """Extract financial data from CSV file"""
+def extract_financial_data_csv(uploaded_file, column_to_extract='last'):
+    """
+    Extract financial data from CSV file
+
+    Args:
+        uploaded_file: Uploaded CSV file
+        column_to_extract: 'last' for PY comparative (from CY file),
+                          'first' for CY actual (from PY file)
+    """
     try:
         df = pd.read_csv(uploaded_file)
 
@@ -162,11 +169,31 @@ def extract_financial_data_csv(uploaded_file):
             st.error("CSV must have at least 2 columns (Line Item and Amount)")
             return None
 
-        # Rename columns to standard names
-        df.columns = ['line_item', 'amount'] + list(df.columns[2:])
-
         # Clean the data
-        df['line_item'] = df['line_item'].fillna('').astype(str).str.strip()
+        df.columns = [str(col).strip() for col in df.columns]
+
+        # First column is line item
+        line_item_col = df.columns[0]
+        df['line_item'] = df[line_item_col].fillna('').astype(str).str.strip()
+
+        # Extract the appropriate amount column
+        amount_columns = [col for col in df.columns[1:] if col != 'line_item']
+
+        if len(amount_columns) == 0:
+            st.error("No amount columns found")
+            return None
+
+        # Select which column to use based on parameter
+        if column_to_extract == 'last':
+            # For Current Year file: Use LAST column (PY Comparative)
+            amount_col = amount_columns[-1]
+            col_description = "Last column (Previous Year Comparative)"
+        else:  # 'first'
+            # For Previous Year file: Use FIRST amount column (CY Actual)
+            amount_col = amount_columns[0]
+            col_description = "First amount column (Current Year Actual)"
+
+        st.info(f"📊 Extracting from: {col_description} - Column '{amount_col}'")
 
         # Convert amount to numeric with validation
         def clean_amount(val):
@@ -189,13 +216,13 @@ def extract_financial_data_csv(uploaded_file):
             except:
                 return np.nan
 
-        df['amount'] = df['amount'].apply(clean_amount)
+        df['amount'] = df[amount_col].apply(clean_amount)
 
         # Remove empty rows
         df = df[df['line_item'] != ''].reset_index(drop=True)
 
-        st.success(f"✅ Loaded {len(df)} line items from CSV")
-        return df
+        st.success(f"✅ Loaded {len(df)} line items from '{amount_col}' column")
+        return df[['line_item', 'amount']]
 
     except Exception as e:
         st.error(f"Error reading CSV: {str(e)}")
@@ -312,37 +339,61 @@ def extract_pdf_text(pdf_file):
         st.error(f"Error extracting PDF: {str(e)}")
         return None
 
-def call_gpt4_extraction(pages_text, year_label, api_key):
-    """Use GPT-4o-mini to extract financial data"""
+def call_gpt4_extraction(pages_text, year_label, api_key, extract_column='comparative'):
+    """
+    Use GPT-4o-mini to extract financial data
+
+    Args:
+        extract_column: 'comparative' for PY comparative (from CY file),
+                       'actual' for CY actual (from PY file)
+    """
     # Use all pages, increase character limit
     combined_text = "\n\n".join([p['text'] for p in pages_text])
 
-    prompt = f"""You are a financial analyst extracting data from annual reports.
+    # Determine which column to extract
+    if extract_column == 'comparative':
+        column_instruction = """Extract from the PREVIOUS YEAR COMPARATIVE column (typically the rightmost/last amount column).
+This is usually labeled with the prior year (e.g., "2023", "FY2023", "31-Mar-2023").
+This column shows the prior year comparatives that need to be verified."""
+    else:  # 'actual'
+        column_instruction = """Extract from the CURRENT YEAR ACTUAL column (typically the first/main amount column).
+This is usually the larger/bold amount or the first amount column.
+This column shows the signed/audited figures from the current financial statements."""
 
-Extract financial statements from this {year_label} annual report:
+    prompt = f"""You are a financial analyst extracting data from annual reports for comparatives verification.
+
+{year_label} Financial Statements - Extract data for verification.
+
+{column_instruction}
+
+Extract from these statements:
 - Balance Sheet (Assets, Liabilities, Equity)
 - Income Statement (Revenue, Expenses, Profit)
 - Cash Flow Statement
+- All Schedules and Notes
 
-For each line item extract:
-1. Exact line item name
+For EVERY line item extract:
+1. Exact line item name (Property Plant & Equipment, Trade Receivables, etc.)
 2. Amount (number, no commas)
-3. Statement type (Balance Sheet, Income Statement, Cash Flow Statement, or Other)
+3. Statement type (Balance Sheet, Income Statement, Cash Flow Statement, Schedule [X], or Notes)
 
 Return ONLY valid JSON:
 {{
   "line_items": [
     {{"line_item": "Property plant and equipment", "amount": 72984, "statement_type": "Balance Sheet"}},
-    {{"line_item": "Revenue from operations", "amount": 13139, "statement_type": "Income Statement"}},
+    {{"line_item": "Trade receivables", "amount": 13139, "statement_type": "Balance Sheet"}},
+    {{"line_item": "Revenue from operations", "amount": 234567, "statement_type": "Income Statement"}},
     ...
   ]
 }}
 
-CRITICAL:
-- Extract ONLY from {year_label} column
-- Skip headers, page numbers, note references
+CRITICAL REQUIREMENTS:
+- Extract EVERY line item - do NOT skip any
+- {column_instruction.split('.')[0]}
+- Skip headers, totals, subtotals, page numbers, note references
 - Include statement_type for categorization
 - Process ALL pages provided
+- Include line items from ALL schedules and notes
 
 TEXT:
 {combined_text[:25000]}
@@ -396,21 +447,37 @@ TEXT:
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-def call_claude_extraction(pages_text, year_label, api_key):
-    """Use Claude Haiku to extract financial data"""
+def call_claude_extraction(pages_text, year_label, api_key, extract_column='comparative'):
+    """
+    Use Claude Haiku to extract financial data
+
+    Args:
+        extract_column: 'comparative' for PY comparative (from CY file),
+                       'actual' for CY actual (from PY file)
+    """
     # Use all pages, increase character limit
     combined_text = "\n\n".join([p['text'] for p in pages_text])
 
-    prompt = f"""Extract financial statements from {year_label} annual report.
+    # Determine which column to extract
+    if extract_column == 'comparative':
+        column_instruction = "Extract PREVIOUS YEAR COMPARATIVE (rightmost/last column, prior year numbers)."
+    else:  # 'actual'
+        column_instruction = "Extract CURRENT YEAR ACTUAL (first/main amount column, signed figures)."
 
-Include Balance Sheet, Income Statement, and Cash Flow items.
+    prompt = f"""{year_label} Financial Statements - Comparatives Verification.
 
-Return JSON: {{"line_items": [{{"line_item": "name", "amount": number, "statement_type": "Balance Sheet|Income Statement|Cash Flow Statement|Other"}}, ...]}}
+{column_instruction}
+
+Extract ALL line items from Balance Sheet, Income Statement, Cash Flow, and all Schedules/Notes.
+
+Return JSON: {{"line_items": [{{"line_item": "name", "amount": number, "statement_type": "Balance Sheet|Income Statement|Cash Flow Statement|Schedule X|Notes"}}, ...]}}
 
 CRITICAL:
-- Extract ONLY from {year_label} column
+- {column_instruction}
+- Extract EVERY line item - do NOT miss any
 - Include statement_type for each item
 - Process ALL pages
+- Skip headers and totals
 
 TEXT:
 {combined_text[:25000]}
@@ -669,23 +736,29 @@ Goodwill,13139""")
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("📁 Current Year CSV")
-        cy_file_csv = st.file_uploader("Upload Current Year", type=['csv'], key='cy_csv')
+        st.subheader("📁 Current Year Statements (e.g., FY 2024)")
+        st.caption("Contains PY comparatives to be verified")
+        cy_file_csv = st.file_uploader("Upload Current Year CSV", type=['csv'], key='cy_csv',
+                                      help="Will extract LAST column (Previous Year Comparative)")
 
         if cy_file_csv:
             with st.expander("Preview"):
                 preview = pd.read_csv(cy_file_csv, nrows=5)
                 st.dataframe(preview)
+                st.info("Will extract: LAST column (PY Comparative)")
                 cy_file_csv.seek(0)
 
     with col2:
-        st.subheader("📁 Previous Year CSV")
-        py_file_csv = st.file_uploader("Upload Previous Year", type=['csv'], key='py_csv')
+        st.subheader("📁 Previous Year Statements (e.g., FY 2023)")
+        st.caption("Signed/audited actual figures")
+        py_file_csv = st.file_uploader("Upload Previous Year CSV", type=['csv'], key='py_csv',
+                                      help="Will extract FIRST amount column (Current Year Actual)")
 
         if py_file_csv:
             with st.expander("Preview"):
                 preview = pd.read_csv(py_file_csv, nrows=5)
                 st.dataframe(preview)
+                st.info("Will extract: FIRST amount column (CY Actual)")
                 py_file_csv.seek(0)
 
     if cy_file_csv and py_file_csv:
@@ -697,8 +770,11 @@ Goodwill,13139""")
                 st.stop()
 
             with st.spinner("Processing..."):
-                cy_df = extract_financial_data_csv(cy_file_csv)
-                py_df = extract_financial_data_csv(py_file_csv)
+                # Current Year file: Extract LAST column (PY Comparative - what needs to be verified)
+                cy_df = extract_financial_data_csv(cy_file_csv, column_to_extract='last')
+
+                # Previous Year file: Extract FIRST amount column (CY Actual - the signed numbers)
+                py_df = extract_financial_data_csv(py_file_csv, column_to_extract='first')
 
                 if cy_df is not None and py_df is not None:
                     results_df = match_line_items_csv(cy_df, py_df, similarity_threshold_csv)
@@ -829,12 +905,16 @@ with tab2:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("📄 Current Year PDF")
-        cy_file_pdf = st.file_uploader("Upload Current Year", type=['pdf'], key='cy_pdf')
+        st.subheader("📄 Current Year Statements (e.g., FY 2024)")
+        st.caption("Contains PY comparatives to be verified")
+        cy_file_pdf = st.file_uploader("Upload Current Year PDF", type=['pdf'], key='cy_pdf',
+                                      help="Will extract Previous Year Comparative column")
 
     with col2:
-        st.subheader("📄 Previous Year PDF")
-        py_file_pdf = st.file_uploader("Upload Previous Year", type=['pdf'], key='py_pdf')
+        st.subheader("📄 Previous Year Statements (e.g., FY 2023)")
+        st.caption("Signed/audited actual figures")
+        py_file_pdf = st.file_uploader("Upload Previous Year PDF", type=['pdf'], key='py_pdf',
+                                      help="Will extract Current Year Actual column")
 
     if cy_file_pdf and py_file_pdf and api_key_llm:
         st.markdown("---")
@@ -853,11 +933,15 @@ with tab2:
                 if cy_text and py_text:
                     # Extract with LLM
                     if use_claude:
-                        cy_result = call_claude_extraction(cy_text, "Current Year", api_key_llm)
-                        py_result = call_claude_extraction(py_text, "Previous Year", api_key_llm)
+                        # Current Year file: Extract PY Comparative (what needs verification)
+                        cy_result = call_claude_extraction(cy_text, "Current Year", api_key_llm, extract_column='comparative')
+                        # Previous Year file: Extract CY Actual (signed/audited figures)
+                        py_result = call_claude_extraction(py_text, "Previous Year", api_key_llm, extract_column='actual')
                     else:
-                        cy_result = call_gpt4_extraction(cy_text, "Current Year", api_key_llm)
-                        py_result = call_gpt4_extraction(py_text, "Previous Year", api_key_llm)
+                        # Current Year file: Extract PY Comparative (what needs verification)
+                        cy_result = call_gpt4_extraction(cy_text, "Current Year", api_key_llm, extract_column='comparative')
+                        # Previous Year file: Extract CY Actual (signed/audited figures)
+                        py_result = call_gpt4_extraction(py_text, "Previous Year", api_key_llm, extract_column='actual')
 
                     if cy_result['success'] and py_result['success']:
                         st.success("✅ Extraction complete!")
