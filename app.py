@@ -499,17 +499,69 @@ def generate_excel_report(results_df, filename_prefix="comparison"):
 
 # ==================== CSV VERSION FUNCTIONS ====================
 
-def extract_financial_data_csv(uploaded_file, column_to_extract='last'):
+def get_excel_sheets(uploaded_file):
+    """Get list of sheet names from Excel file"""
+    try:
+        uploaded_file.seek(0)
+        wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+        sheets = [sheet for sheet in wb.sheetnames if wb[sheet].sheet_state != 'hidden']
+        wb.close()
+        uploaded_file.seek(0)
+        return sheets
+    except Exception as e:
+        st.error(f"Error reading Excel file: {str(e)}")
+        return []
+
+def read_file_to_dataframe(uploaded_file, sheet_name=None):
     """
-    Extract financial data from CSV file
+    Read CSV or Excel file to DataFrame
 
     Args:
-        uploaded_file: Uploaded CSV file
-        column_to_extract: 'last' for PY comparative (from CY file),
-                          'first' for CY actual (from PY file)
+        uploaded_file: Uploaded file object
+        sheet_name: Sheet name for Excel files (None for CSV)
+
+    Returns:
+        DataFrame or None if error
     """
     try:
-        df = pd.read_csv(uploaded_file)
+        uploaded_file.seek(0)
+        filename = uploaded_file.name.lower()
+
+        if filename.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        elif filename.endswith(('.xlsx', '.xls')):
+            if sheet_name:
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name, engine='openpyxl')
+            else:
+                # Read first visible sheet
+                df = pd.read_excel(uploaded_file, engine='openpyxl')
+        else:
+            st.error(f"Unsupported file format: {filename}")
+            return None
+
+        uploaded_file.seek(0)
+        return df
+
+    except Exception as e:
+        st.error(f"Error reading file: {str(e)}")
+        uploaded_file.seek(0)
+        return None
+
+def extract_financial_data_csv(uploaded_file, column_to_extract='last', sheet_name=None):
+    """
+    Extract financial data from CSV or Excel file
+
+    Args:
+        uploaded_file: Uploaded CSV or Excel file
+        column_to_extract: 'last' for PY comparative (from CY file),
+                          'first' for CY actual (from PY file)
+        sheet_name: Sheet name for Excel files (None for CSV or first sheet)
+    """
+    try:
+        # Read file (CSV or Excel)
+        df = read_file_to_dataframe(uploaded_file, sheet_name)
+        if df is None:
+            return None
 
         if df.shape[1] < 2:
             st.error("CSV must have at least 2 columns (Line Item and Amount)")
@@ -1059,17 +1111,17 @@ st.markdown("### Unified Version - CSV & LLM")
 st.markdown("---")
 
 # Create tabs
-tab1, tab2, tab3 = st.tabs(["📄 CSV Version", "🤖 LLM Version (PDF)", "ℹ️ Help"])
+tab1, tab2, tab3 = st.tabs(["📄 CSV/Excel Version", "🤖 LLM Version (PDF)", "ℹ️ Help"])
 
-# ==================== TAB 1: CSV VERSION ====================
+# ==================== TAB 1: CSV/EXCEL VERSION ====================
 
 with tab1:
-    st.header("CSV-Based Comparison")
-    st.markdown("**Manual CSV input with exact amount matching**")
+    st.header("CSV/Excel-Based Comparison")
+    st.markdown("**Manual CSV or Excel input with exact amount matching**")
 
-    # Sidebar for CSV
+    # Sidebar for CSV/Excel
     with st.sidebar:
-        st.header("⚙️ CSV Configuration")
+        st.header("⚙️ Configuration")
 
         similarity_threshold_csv = st.slider(
             "Text Similarity Threshold",
@@ -1083,7 +1135,10 @@ with tab1:
         st.info("💰 **Amount Matching**: Exact match required (zero tolerance)")
 
         st.markdown("---")
-        st.markdown("### 📋 CSV Format")
+        st.markdown("### 📋 Supported Formats")
+        st.markdown("- **CSV**: Standard comma-separated values")
+        st.markdown("- **Excel**: .xlsx or .xls files")
+        st.markdown("- Multi-sheet Excel supported")
         st.code("""line_item,amount
 Property plant equipment,72984
 Goodwill,13139""")
@@ -1093,43 +1148,73 @@ Goodwill,13139""")
     with col1:
         st.subheader("📁 Current Year Statements (e.g., FY 2024)")
         st.caption("Contains PY comparatives to be verified")
-        cy_file_csv = st.file_uploader("Upload Current Year CSV", type=['csv'], key='cy_csv',
+        cy_file_csv = st.file_uploader("Upload Current Year File", type=['csv', 'xlsx', 'xls'], key='cy_csv',
                                       help="Will extract LAST column (Previous Year Comparative)")
 
+        cy_sheet_name = None
         if cy_file_csv:
+            # Check if Excel and get sheets
+            if cy_file_csv.name.lower().endswith(('.xlsx', '.xls')):
+                sheets = get_excel_sheets(cy_file_csv)
+                if sheets and len(sheets) > 1:
+                    cy_sheet_name = st.selectbox(
+                        "Select sheet (Current Year)",
+                        sheets,
+                        key='cy_sheet',
+                        help="Choose which sheet to extract data from"
+                    )
+                elif sheets:
+                    cy_sheet_name = sheets[0]
+                    st.info(f"📄 Using sheet: {cy_sheet_name}")
+
             with st.expander("Preview"):
-                preview = pd.read_csv(cy_file_csv, nrows=5)
-                st.dataframe(preview)
-                st.info("Will extract: LAST column (PY Comparative)")
-                cy_file_csv.seek(0)
+                preview = read_file_to_dataframe(cy_file_csv, cy_sheet_name)
+                if preview is not None:
+                    st.dataframe(preview.head(5))
+                    st.info("Will extract: LAST column (PY Comparative)")
 
     with col2:
         st.subheader("📁 Previous Year Statements (e.g., FY 2023)")
         st.caption("Signed/audited actual figures")
-        py_file_csv = st.file_uploader("Upload Previous Year CSV", type=['csv'], key='py_csv',
+        py_file_csv = st.file_uploader("Upload Previous Year File", type=['csv', 'xlsx', 'xls'], key='py_csv',
                                       help="Will extract FIRST amount column (Current Year Actual)")
 
+        py_sheet_name = None
         if py_file_csv:
+            # Check if Excel and get sheets
+            if py_file_csv.name.lower().endswith(('.xlsx', '.xls')):
+                sheets = get_excel_sheets(py_file_csv)
+                if sheets and len(sheets) > 1:
+                    py_sheet_name = st.selectbox(
+                        "Select sheet (Previous Year)",
+                        sheets,
+                        key='py_sheet',
+                        help="Choose which sheet to extract data from"
+                    )
+                elif sheets:
+                    py_sheet_name = sheets[0]
+                    st.info(f"📄 Using sheet: {py_sheet_name}")
+
             with st.expander("Preview"):
-                preview = pd.read_csv(py_file_csv, nrows=5)
-                st.dataframe(preview)
-                st.info("Will extract: FIRST amount column (CY Actual)")
-                py_file_csv.seek(0)
+                preview = read_file_to_dataframe(py_file_csv, py_sheet_name)
+                if preview is not None:
+                    st.dataframe(preview.head(5))
+                    st.info("Will extract: FIRST amount column (CY Actual)")
 
     if cy_file_csv and py_file_csv:
         st.markdown("---")
 
-        if st.button("🔍 Compare (CSV)", type="primary", use_container_width=True):
+        if st.button("🔍 Compare", type="primary", use_container_width=True):
             # Validate file sizes
             if not validate_file_size(cy_file_csv) or not validate_file_size(py_file_csv):
                 st.stop()
 
             with st.spinner("Processing..."):
                 # Current Year file: Extract LAST column (PY Comparative - what needs to be verified)
-                cy_df = extract_financial_data_csv(cy_file_csv, column_to_extract='last')
+                cy_df = extract_financial_data_csv(cy_file_csv, column_to_extract='last', sheet_name=cy_sheet_name)
 
                 # Previous Year file: Extract FIRST amount column (CY Actual - the signed numbers)
-                py_df = extract_financial_data_csv(py_file_csv, column_to_extract='first')
+                py_df = extract_financial_data_csv(py_file_csv, column_to_extract='first', sheet_name=py_sheet_name)
 
                 if cy_df is not None and py_df is not None:
                     # ==================== PHASE 2: DATA VALIDATION ====================
